@@ -1,0 +1,76 @@
+name: helm-release
+
+on:
+  release:
+    types: [published]
+  # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Chart version to publish (e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  helm-release:
+    runs-on: ubuntu-latest
+    # only allow releases from the main branch
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.release.target_commitish == 'main' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "latest"
+
+      - name: Determine chart version
+        id: chart_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            # Strip leading 'v' from the release tag (e.g. v1.2.3 -> 1.2.3)
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package Helm chart
+        run: |
+          helm package charts/snyk-exporter \
+            --version "${{ steps.chart_version.outputs.version }}" \
+            --app-version "${GITHUB_REF_NAME:-dev}" \
+            --destination /tmp/helm-packages
+
+      - name: Push chart to GHCR
+        run: |
+          helm push \
+            /tmp/helm-packages/snyk-exporter-${{ steps.chart_version.outputs.version }}.tgz \
+            oci://ghcr.io/${{ github.repository_owner }}/charts
+
+      - name: Summary
+        run: |
+          echo "### Helm Chart Published :ship:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Chart:** \`snyk-exporter\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version:** \`${{ steps.chart_version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Registry:** \`ghcr.io/${{ github.repository_owner }}/charts/snyk-exporter\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Install with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
+          echo "helm install snyk-exporter oci://ghcr.io/${{ github.repository_owner }}/charts/snyk-exporter \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --version ${{ steps.chart_version.outputs.version }} \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --namespace monitoring \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --set snyk.apiToken=<your-token>" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,110 @@
+# Default values for snyk-exporter.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/polarpoint-io/snyk_exporter
+  pullPolicy: IfNotPresent
+  # Overrides the image tag. Defaults to the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9532"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  fsGroup: 65534
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+snyk:
+  # Snyk API token — set this or reference an existing secret via existingSecret
+  apiToken: ""
+
+  # Name of an existing Secret containing the Snyk API token.
+  # The secret must have a key named `api-token`.
+  # If set, snyk.apiToken above is ignored.
+  existingSecret: ""
+
+  # Snyk REST API base URL
+  apiUrl: "https://api.snyk.io/rest"
+
+  # Polling interval in seconds (default 10 minutes)
+  interval: 600
+
+  # Request timeout in seconds
+  timeout: 10
+
+  # Restrict scraping to specific organization IDs (list).
+  # If empty, all organizations accessible to the token are scraped.
+  organizations: []
+  # - "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+service:
+  type: ClusterIP
+  port: 9532
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 64Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 15
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  failureThreshold: 3
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Extra environment variables to add to the container
+extraEnv: []
+
+# Extra volumes
+extraVolumes: []
+
+# Extra volume mounts
+extraVolumeMounts: []
