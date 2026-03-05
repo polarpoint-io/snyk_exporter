@@ -1,0 +1,26 @@
+Thank you for installing {{ .Chart.Name }} v{{ .Chart.Version }}.
+
+The Snyk Exporter is now scraping the Snyk REST API v2 and exposing
+Prometheus metrics on port 9532.
+
+1. Check the exporter is ready:
+
+   kubectl get pods -n {{ .Release.Namespace }} -l "{{ include "snyk-exporter.selectorLabels" . | replace "\n" "," }}"
+
+2. Once the pod is Running, verify it has completed its first scrape:
+
+   kubectl logs -n {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "snyk-exporter.name" . }}" --tail=20
+
+3. Access the metrics endpoint locally:
+
+   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "snyk-exporter.fullname" . }} 9532:9532
+
+   Then open: http://localhost:9532/metrics
+
+Key metric exposed:
+
+  snyk_vulnerabilities_total{organization, project, severity, issue_type,
+                              issue_title, ignored, upgradeable, patchable, monitored}
+
+Scrape interval: {{ .Values.snyk.interval }}s
+API URL:         {{ .Values.snyk.apiUrl }}

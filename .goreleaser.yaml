@@ -5,10 +5,10 @@ builds:
 dockers:
   - dockerfile: Dockerfile-goreleaser
     image_templates:
-      - "quay.io/lunarway/snyk_exporter:latest"
-      - "quay.io/lunarway/snyk_exporter:v{{ .Major }}"
-      - "quay.io/lunarway/snyk_exporter:v{{ .Major }}.{{ .Minor }}"
-      - "quay.io/lunarway/snyk_exporter:v{{ .Major }}.{{ .Minor }}.{{ .Patch }}"
+      - "ghcr.io/polarpoint-io/snyk_exporter:latest"
+      - "ghcr.io/polarpoint-io/snyk_exporter:v{{ .Major }}"
+      - "ghcr.io/polarpoint-io/snyk_exporter:v{{ .Major }}.{{ .Minor }}"
+      - "ghcr.io/polarpoint-io/snyk_exporter:v{{ .Major }}.{{ .Minor }}.{{ .Patch }}"
 
 archives:
   - format: binary

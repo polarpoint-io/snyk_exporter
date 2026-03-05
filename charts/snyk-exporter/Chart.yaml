@@ -1,0 +1,18 @@
+apiVersion: v2
+name: snyk-exporter
+description: Prometheus exporter for Snyk vulnerability data using the Snyk REST API v2
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - snyk
+  - prometheus
+  - exporter
+  - security
+  - vulnerabilities
+home: https://github.com/polarpoint-io/snyk_exporter
+sources:
+  - https://github.com/polarpoint-io/snyk_exporter
+maintainers:
+  - name: polarpoint-io
+    url: https://github.com/polarpoint-io

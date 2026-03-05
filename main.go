@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/log"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -52,21 +52,20 @@ var (
 
 func main() {
 	flags := kingpin.New("snyk_exporter", "Snyk exporter for Prometheus. Provide your Snyk API token and the organization(s) to scrape to expose Prometheus metrics.")
-	snykAPIURL := flags.Flag("snyk.api-url", "Snyk API URL").Default("https://snyk.io/api/v1").String()
+	snykAPIURL := flags.Flag("snyk.api-url", "Snyk REST API base URL").Default("https://api.snyk.io/rest").String()
 	snykAPIToken := flags.Flag("snyk.api-token", "Snyk API token").Required().String()
 	snykInterval := flags.Flag("snyk.interval", "Polling interval for requesting data from Snyk API in seconds").Short('i').Default("600").Int()
 	snykOrganizations := flags.Flag("snyk.organization", "Snyk organization ID to scrape projects from (can be repeated for multiple organizations)").Strings()
 	requestTimeout := flags.Flag("snyk.timeout", "Timeout for requests against Snyk API").Default("10").Int()
 	listenAddress := flags.Flag("web.listen-address", "Address on which to expose metrics.").Default(":9532").String()
-	log.AddFlags(flags)
 	flags.HelpFlag.Short('h')
 	flags.Version(version)
 	kingpin.MustParse(flags.Parse(os.Args[1:]))
 
 	if len(*snykOrganizations) != 0 {
-		log.Infof("Starting Snyk exporter for organization '%s'", strings.Join(*snykOrganizations, ","))
+		slog.Info("Starting Snyk exporter for organization", "organizations", strings.Join(*snykOrganizations, ","))
 	} else {
-		log.Info("Starting Snyk exporter for all organization for token")
+		slog.Info("Starting Snyk exporter for all organization for token")
 	}
 
 	prometheus.MustRegister(vulnerabilityGauge)
@@ -94,7 +93,7 @@ func main() {
 
 		_, err := w.Write([]byte(strconv.FormatBool(ready)))
 		if err != nil {
-			log.With("error", err).Errorf("Failed to write ready response: %v", err)
+			slog.Error("Failed to write ready response", "error", err)
 		}
 	})
 
@@ -108,7 +107,7 @@ func main() {
 	var wg sync.WaitGroup
 
 	go func() {
-		log.Infof("Listening on %s", *listenAddress)
+		slog.Info("Listening", "address", *listenAddress)
 		err := http.ListenAndServe(*listenAddress, nil)
 		if err != nil {
 			componentFailed <- fmt.Errorf("http listener stopped: %v", err)
@@ -124,10 +123,10 @@ func main() {
 		defer wg.Done()
 		select {
 		case sig := <-sigs:
-			log.Infof("Received os signal '%s'. Terminating...", sig)
+			slog.Info("Received os signal, terminating", "signal", sig)
 		case err := <-componentFailed:
 			if err != nil {
-				log.Errorf("Component failed: %v", err)
+				slog.Error("Component failed", "error", err)
 				exitCode = 1
 			}
 		}
@@ -137,8 +136,8 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Info("Snyk API scraper starting")
-		defer log.Info("Snyk API scraper stopped")
+		slog.Info("Snyk API scraper starting")
+		defer slog.Info("Snyk API scraper stopped")
 		err := runAPIPolling(ctx, *snykAPIURL, *snykAPIToken, *snykOrganizations, secondDuration(*snykInterval), secondDuration(*requestTimeout))
 		if err != nil {
 			componentFailed <- fmt.Errorf("snyk api scraper: %w", err)
@@ -148,10 +147,10 @@ func main() {
 	// wait for all components to stop
 	wg.Wait()
 	if exitCode != 0 {
-		log.Errorf("Snyk exporter exited with exit %d", exitCode)
+		slog.Error("Snyk exporter exiting", "exitCode", exitCode)
 		os.Exit(exitCode)
 	} else {
-		log.Infof("Snyk exporter exited with exit 0")
+		slog.Info("Snyk exporter exited with exit 0")
 	}
 }
 
@@ -171,7 +170,7 @@ func runAPIPolling(ctx context.Context, url, token string, organizationIDs []str
 	if err != nil {
 		return err
 	}
-	log.Infof("Running Snyk API scraper for organizations: %v", strings.Join(organizationNames(organizations), ", "))
+	slog.Info("Running Snyk API scraper for organizations", "organizations", strings.Join(organizationNames(organizations), ", "))
 
 	// kick off a poll right away to get metrics available right after startup
 	pollAPI(ctx, &client, organizations)
@@ -191,18 +190,40 @@ func runAPIPolling(ctx context.Context, url, token string, organizationIDs []str
 // pollAPI collects data from provided organizations and registers them in the
 // prometheus registry.
 func pollAPI(ctx context.Context, client *client, organizations []org) {
+	scrapeStart := time.Now()
+	total := len(organizations)
+	slog.Info("Scrape cycle started", "organizations", total)
+
 	var gaugeResults []gaugeResult
-	for _, organization := range organizations {
-		log.Infof("Collecting for organization '%s'", organization.Name)
+	for i, organization := range organizations {
+		slog.Info("Collecting organization",
+			"progress", fmt.Sprintf("%d/%d", i+1, total),
+			"organization", organization.Name,
+			"organizationId", organization.ID)
+		orgStart := time.Now()
 		results, err := collect(ctx, client, organization)
+		orgDuration := time.Since(orgStart)
 		if err != nil {
-			log.With("error", err).
-				With("organzationName", organization.Name).
-				With("organzationId", organization.ID).
-				Errorf("Collection failed for organization '%s': %v", organization.Name, err)
+			slog.Error("Collection failed for organization",
+				"error", err,
+				"organization", organization.Name,
+				"organizationId", organization.ID,
+				"duration", orgDuration)
 			continue
 		}
-		log.Infof("Recorded %d results for organization '%s'", len(results), organization.Name)
+		// count total issues across all projects for this org
+		issueCount := 0
+		for _, r := range results {
+			for _, ar := range r.results {
+				issueCount += ar.count
+			}
+		}
+		slog.Info("Collected organization",
+			"progress", fmt.Sprintf("%d/%d", i+1, total),
+			"organization", organization.Name,
+			"projects", len(results),
+			"issues", issueCount,
+			"duration", orgDuration.Round(time.Millisecond))
 		gaugeResults = append(gaugeResults, results...)
 		// stop right away in case of the context being cancelled. This ensures that
 		// we don't wait for a complete collect run for all organizations before
@@ -213,7 +234,11 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 		default:
 		}
 	}
-	log.Infof("Exposing %d results as metrics", len(gaugeResults))
+	scrapeDuration := time.Since(scrapeStart)
+	slog.Info("Scrape cycle complete",
+		"organizations", total,
+		"totalGaugeResults", len(gaugeResults),
+		"duration", scrapeDuration.Round(time.Millisecond))
 	scrapeMutex.Lock()
 	register(gaugeResults)
 	scrapeMutex.Unlock()
@@ -257,7 +282,7 @@ func filterByIDs(organizations []org, ids []string) []org {
 	return filtered
 }
 
-// register registers results in the vulnerbility gauge. To handle changing
+// register registers results in the vulnerability gauge. To handle changing
 // flags, e.g. ignored, upgradeable the metric is cleared before setting new
 // values.
 // See https://github.com/lunarway/snyk_exporter/issues/21 for details.
@@ -283,23 +308,41 @@ func collect(ctx context.Context, client *client, organization org) ([]gaugeResu
 		return nil, fmt.Errorf("get projects for organization: %w", err)
 	}
 
+	total := len(projects.Projects)
+	slog.Info("Fetched projects for organization",
+		"organization", organization.Name,
+		"projects", total)
+
 	var gaugeResults []gaugeResult
-	for _, project := range projects.Projects {
+	for i, project := range projects.Projects {
 		start := time.Now()
 		issues, err := client.getIssues(organization.ID, project.ID)
 		duration := time.Since(start)
 		if err != nil {
-			log.Errorf("Failed to get issues for organization %s (%s) and project %s (%s): duration %v:  %v", organization.Name, organization.ID, project.Name, project.ID, duration, err)
+			slog.Error("Failed to get issues for project",
+				"organization", organization.Name,
+				"project", project.Name,
+				"projectId", project.ID,
+				"progress", fmt.Sprintf("%d/%d", i+1, total),
+				"duration", duration.Round(time.Millisecond),
+				"error", err)
 			continue
 		}
 		results := aggregateIssues(issues.Issues)
+		issueCount := len(issues.Issues)
+		slog.Info("Collected project",
+			"organization", organization.Name,
+			"project", project.Name,
+			"progress", fmt.Sprintf("%d/%d", i+1, total),
+			"issues", issueCount,
+			"monitored", project.IsMonitored,
+			"duration", duration.Round(time.Millisecond))
 		gaugeResults = append(gaugeResults, gaugeResult{
 			organization: organization.Name,
 			project:      project.Name,
 			results:      results,
 			isMonitored:  project.IsMonitored,
 		})
-		log.Debugf("Collected data in %v for %s %s", duration, project.ID, project.Name)
 		// stop right away in case of the context being cancelled. This ensures that
 		// we don't wait for a complete collect run for all projects before
 		// stopping.
