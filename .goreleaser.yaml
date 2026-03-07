@@ -1,5 +1,6 @@
 builds:
-  - env:
+  - id: snyk_exporter
+    env:
       - CGO_ENABLED=0
     goos:
       - linux
@@ -10,16 +11,52 @@ builds:
       - arm64
 
 dockers:
-  - dockerfile: Dockerfile-goreleaser
+  - ids:
+      - snyk_exporter
+    dockerfile: Dockerfile-goreleaser
     use: buildx
+    goos: linux
+    goarch: amd64
     build_flag_templates:
       - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.source=https://github.com/polarpoint-io/snyk_exporter"
     image_templates:
-      - "ghcr.io/polarpoint-io/snyk_exporter:latest"
-      - "ghcr.io/polarpoint-io/snyk_exporter:v{{ .Major }}"
-      - "ghcr.io/polarpoint-io/snyk_exporter:v{{ .Major }}.{{ .Minor }}"
-      - "ghcr.io/polarpoint-io/snyk_exporter:v{{ .Major }}.{{ .Minor }}.{{ .Patch }}"
-    goarch: amd64
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-amd64"
+  - ids:
+      - snyk_exporter
+    dockerfile: Dockerfile-goreleaser
+    use: buildx
+    goos: linux
+    goarch: arm64
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.source=https://github.com/polarpoint-io/snyk_exporter"
+    image_templates:
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-arm64"
+
+docker_manifests:
+  - name_template: "ghcr.io/polarpoint-io/snyk_exporter:latest"
+    image_templates:
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-amd64"
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-arm64"
+  - name_template: "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-amd64"
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-arm64"
+  - name_template: "ghcr.io/polarpoint-io/snyk_exporter:v{{ .Major }}"
+    image_templates:
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-amd64"
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-arm64"
+  - name_template: "ghcr.io/polarpoint-io/snyk_exporter:v{{ .Major }}.{{ .Minor }}"
+    image_templates:
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-amd64"
+      - "ghcr.io/polarpoint-io/snyk_exporter:{{ .Tag }}-arm64"
 
 archives:
   - format: binary
