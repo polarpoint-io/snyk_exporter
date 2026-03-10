@@ -1,3 +1,4 @@
 /snyk_exporter
 /dist/
 .vscode
+node_modules/
