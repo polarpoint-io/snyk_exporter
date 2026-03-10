@@ -1,9 +1,13 @@
 name: helm-release
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "charts/**"
   release:
     types: [published]
-  # Allow manual trigger for testing
   workflow_dispatch:
     inputs:
       version:
@@ -11,18 +15,24 @@ on:
         required: true
 
 permissions:
-  contents: read
+  contents: write   # write needed to commit the bumped Chart.yaml on chart changes
   packages: write
 
 jobs:
   helm-release:
     runs-on: ubuntu-latest
-    # only allow releases from the main branch
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.release.target_commitish == 'main' }}
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      github.event.release.target_commitish == 'main'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Need full history + ability to push back the bumped Chart.yaml
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
@@ -32,12 +42,35 @@ jobs:
       - name: Determine chart version
         id: chart_version
         run: |
+          CURRENT=$(grep '^version:' charts/snyk-exporter/Chart.yaml | awk '{print $2}')
+          echo "current=${CURRENT}" >> "$GITHUB_OUTPUT"
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            # Strip leading 'v' from the release tag (e.g. v1.2.3 -> 1.2.3)
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            # Use the git release tag, stripping leading 'v' (e.g. v1.2.3 -> 1.2.3)
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          else
+            # push to main with charts/** changes — auto-bump the patch version
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "bump=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Bump version in Chart.yaml
+        if: steps.chart_version.outputs.bump == 'true'
+        run: |
+          sed -i "s/^version: .*/version: ${{ steps.chart_version.outputs.version }}/" charts/snyk-exporter/Chart.yaml
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add charts/snyk-exporter/Chart.yaml
+          git commit -m "chore: bump helm chart version to ${{ steps.chart_version.outputs.version }} [skip ci]"
+          git push
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -50,7 +83,7 @@ jobs:
         run: |
           helm package charts/snyk-exporter \
             --version "${{ steps.chart_version.outputs.version }}" \
-            --app-version "${GITHUB_REF_NAME:-dev}" \
+            --app-version "${GITHUB_REF_NAME:-main}" \
             --destination /tmp/helm-packages
 
       - name: Push chart to GHCR
@@ -64,8 +97,9 @@ jobs:
           echo "### Helm Chart Published :ship:" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Chart:** \`snyk-exporter\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Version:** \`${{ steps.chart_version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version:** \`${{ steps.chart_version.outputs.version }}\`  _(was \`${{ steps.chart_version.outputs.current }}\`)_" >> "$GITHUB_STEP_SUMMARY"
           echo "**Registry:** \`ghcr.io/${{ github.repository_owner }}/charts/snyk-exporter\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Trigger:** \`${{ github.event_name }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Install with:" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
