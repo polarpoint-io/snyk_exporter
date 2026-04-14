@@ -4,3 +4,27 @@ vars:
   service: snyk_exporter
   squad: gravity
   domain: security-insights
+
+scripts:
+  container:
+    description: Build and push a multi-arch container image to GHCR
+    args:
+      - name: tag
+        default: latest
+    actions:
+      - shell: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --label org.opencontainers.image.title={vars.service} \
+            --label org.opencontainers.image.source=https://github.com/polarpoint-io/{vars.service} \
+            -t ghcr.io/polarpoint-io/{vars.service}:{args.tag} \
+            -f Dockerfile \
+            --push \
+            .
+
+  helm:
+    description: Package and push the Helm chart to GHCR OCI registry
+    actions:
+      - shell: mkdir -p .dist/helm
+      - shell: helm package charts/snyk-exporter --destination .dist/helm
+      - shell: helm push .dist/helm/snyk-exporter-*.tgz oci://ghcr.io/polarpoint-io/charts
