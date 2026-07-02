@@ -195,13 +195,30 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 	slog.Info("Scrape cycle started", "organizations", total)
 
 	var gaugeResults []gaugeResult
+	projectResultsPublished := 0
+	publish := func(stage string) {
+		scrapeMutex.Lock()
+		register(gaugeResults)
+		scrapeMutex.Unlock()
+		readyMutex.Lock()
+		ready = true
+		readyMutex.Unlock()
+		slog.Info("Published metrics snapshot", "stage", stage, "gaugeResults", len(gaugeResults))
+	}
 	for i, organization := range organizations {
 		slog.Info("Collecting organization",
 			"progress", fmt.Sprintf("%d/%d", i+1, total),
 			"organization", organization.Name,
 			"organizationId", organization.ID)
 		orgStart := time.Now()
-		results, err := collect(ctx, client, organization)
+		results, err := collect(ctx, client, organization, func(r gaugeResult) {
+			gaugeResults = append(gaugeResults, r)
+			projectResultsPublished++
+			// Publish progressively so long-running scrapes still surface data.
+			if projectResultsPublished%10 == 0 {
+				publish("project-batch")
+			}
+		})
 		orgDuration := time.Since(orgStart)
 		if err != nil {
 			slog.Error("Collection failed for organization",
@@ -224,7 +241,7 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 			"projects", len(results),
 			"issues", issueCount,
 			"duration", orgDuration.Round(time.Millisecond))
-		gaugeResults = append(gaugeResults, results...)
+		publish("organization-complete")
 		// stop right away in case of the context being cancelled. This ensures that
 		// we don't wait for a complete collect run for all organizations before
 		// stopping.
@@ -239,12 +256,7 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 		"organizations", total,
 		"totalGaugeResults", len(gaugeResults),
 		"duration", scrapeDuration.Round(time.Millisecond))
-	scrapeMutex.Lock()
-	register(gaugeResults)
-	scrapeMutex.Unlock()
-	readyMutex.Lock()
-	ready = true
-	readyMutex.Unlock()
+	publish("cycle-complete")
 }
 
 func organizationNames(orgs []org) []string {
@@ -302,7 +314,7 @@ type gaugeResult struct {
 	results      []aggregateResult
 }
 
-func collect(ctx context.Context, client *client, organization org) ([]gaugeResult, error) {
+func collect(ctx context.Context, client *client, organization org, onProjectCollected func(gaugeResult)) ([]gaugeResult, error) {
 	projects, err := client.getProjects(organization.ID)
 	if err != nil {
 		return nil, fmt.Errorf("get projects for organization: %w", err)
@@ -343,6 +355,9 @@ func collect(ctx context.Context, client *client, organization org) ([]gaugeResu
 			results:      results,
 			isMonitored:  project.IsMonitored,
 		})
+		if onProjectCollected != nil {
+			onProjectCollected(gaugeResults[len(gaugeResults)-1])
+		}
 		// stop right away in case of the context being cancelled. This ensures that
 		// we don't wait for a complete collect run for all projects before
 		// stopping.
