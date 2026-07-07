@@ -20,7 +20,7 @@ Prometheus metrics on port 9532.
 Key metric exposed:
 
   snyk_vulnerabilities_total{organization, project, severity, issue_type,
-                              issue_title, ignored, upgradeable, patchable, monitored}
+                              ignored, upgradeable, patchable, monitored}
 
 Scrape interval: {{ .Values.snyk.interval }}s
 API URL:         {{ .Values.snyk.apiUrl }}

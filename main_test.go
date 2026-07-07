@@ -37,10 +37,9 @@ func TestAggregateIssues(t *testing.T) {
 	aggregateResults := func(aggregateResults ...aggregateResult) []aggregateResult {
 		return aggregateResults
 	}
-	result := func(severity, title string, count int, ignored bool) aggregateResult {
+	result := func(severity string, count int, ignored bool) aggregateResult {
 		return aggregateResult{
 			severity: severity,
-			title:    title,
 			count:    count,
 			ignored:  ignored,
 		}
@@ -58,7 +57,7 @@ func TestAggregateIssues(t *testing.T) {
 		{
 			name:       "single issue",
 			issues:     issues(iss("iss-1", "high", "DDoS")),
-			aggregates: aggregateResults(result("high", "DDoS", 1, false)),
+			aggregates: aggregateResults(result("high", 1, false)),
 		},
 		{
 			name: "multiple of different severity and same title",
@@ -67,8 +66,8 @@ func TestAggregateIssues(t *testing.T) {
 				iss("iss-2", "low", "DDoS"),
 			),
 			aggregates: aggregateResults(
-				result("high", "DDoS", 1, false),
-				result("low", "DDoS", 1, false),
+				result("high", 1, false),
+				result("low", 1, false),
 			),
 		},
 		{
@@ -78,7 +77,7 @@ func TestAggregateIssues(t *testing.T) {
 				iss("iss-2", "high", "DDoS"),
 			),
 			aggregates: aggregateResults(
-				result("high", "DDoS", 2, false),
+				result("high", 2, false),
 			),
 		},
 		{
@@ -88,8 +87,8 @@ func TestAggregateIssues(t *testing.T) {
 				ignoredIssue("iss-2", "high", "DDoS"),
 			),
 			aggregates: aggregateResults(
-				result("high", "DDoS", 1, false),
-				result("high", "DDoS", 1, true),
+				result("high", 1, false),
+				result("high", 1, true),
 			),
 		},
 		{
@@ -99,8 +98,7 @@ func TestAggregateIssues(t *testing.T) {
 				iss("iss-2", "high", "ReDoS"),
 			),
 			aggregates: aggregateResults(
-				result("high", "DDoS", 1, false),
-				result("high", "ReDoS", 1, false),
+				result("high", 2, false),
 			),
 		},
 		{
@@ -110,8 +108,8 @@ func TestAggregateIssues(t *testing.T) {
 				ignoredIssue("iss-2", "high", "ReDoS"),
 			),
 			aggregates: aggregateResults(
-				result("high", "DDoS", 1, false),
-				result("high", "ReDoS", 1, true),
+				result("high", 1, false),
+				result("high", 1, true),
 			),
 		},
 	}
@@ -128,13 +126,11 @@ func TestAggregateIssues(t *testing.T) {
 				return aggregationKey(issue{
 					IssueData: issueData{
 						Severity: output[i].severity,
-						Title:    output[i].title,
 					},
 					Ignored: output[i].ignored,
 				}) < aggregationKey(issue{
 					IssueData: issueData{
 						Severity: output[j].severity,
-						Title:    output[j].title,
 					},
 					Ignored: output[j].ignored,
 				})

@@ -83,7 +83,6 @@ The API results are aggregated and recorded on the `snyk_vulnerabilities_total` 
 - `project` — The project with a vulnerability
 - `severity` — The severity of the vulnerability: `critical`, `high`, `medium` or `low`
 - `issue_type` — The type of issue, e.g. `package_vulnerability`, `license`
-- `issue_title` — The issue title, e.g. `Denial of Service (DoS)`
 - `ignored` — Whether the issue is ignored in Snyk
 - `upgradeable` — Whether the issue can be fixed by upgrading a dependency
 - `patchable` — Whether the issue is patchable through Snyk
@@ -92,10 +91,10 @@ The API results are aggregated and recorded on the `snyk_vulnerabilities_total` 
 Example metrics output:
 
 ```
-snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="critical",issue_type="package_vulnerability",issue_title="Remote Code Execution",ignored="false",upgradeable="false",patchable="false",monitored="true"} 1
-snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="high",issue_type="package_vulnerability",issue_title="Privilege Escalation",ignored="false",upgradeable="true",patchable="false",monitored="true"} 1
-snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="low",issue_type="package_vulnerability",issue_title="Sandbox Escape",ignored="true",upgradeable="false",patchable="false",monitored="false"} 2
-snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="medium",issue_type="license",issue_title="MPL-2.0 license",ignored="true",upgradeable="false",patchable="false",monitored="true"} 1
+snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="critical",issue_type="package_vulnerability",ignored="false",upgradeable="false",patchable="false",monitored="true"} 1
+snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="high",issue_type="package_vulnerability",ignored="false",upgradeable="true",patchable="false",monitored="true"} 1
+snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="low",issue_type="package_vulnerability",ignored="true",upgradeable="false",patchable="false",monitored="false"} 2
+snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="medium",issue_type="license",ignored="true",upgradeable="false",patchable="false",monitored="true"} 1
 ```
 
 # Build
