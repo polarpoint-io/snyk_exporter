@@ -1,5 +1,9 @@
 ﻿# Snyk Exporter
 
+<p align="center">
+  <img src="docs/hero.png" alt="Snyk Exporter — Prometheus metrics for Snyk vulnerabilities" width="100%" />
+</p>
+
 [![Build](https://github.com/polarpoint-io/snyk_exporter/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/polarpoint-io/snyk_exporter/actions/workflows/build.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/polarpoint-io/snyk_exporter)](https://goreportcard.com/report/github.com/polarpoint-io/snyk_exporter)
 
