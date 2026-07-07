@@ -1,6 +1,6 @@
 {
   "name": "snyk-exporter",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Prometheus exporter for Snyk vulnerability data — semantic-release tooling",
   "private": true,
   "devDependencies": {
