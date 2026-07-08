@@ -194,16 +194,6 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 	slog.Info("Scrape cycle started", "organizations", total)
 
 	var gaugeResults []gaugeResult
-	projectResultsPublished := 0
-	publish := func(stage string) {
-		scrapeMutex.Lock()
-		register(gaugeResults)
-		scrapeMutex.Unlock()
-		readyMutex.Lock()
-		ready = true
-		readyMutex.Unlock()
-		slog.Info("Published metrics snapshot", "stage", stage, "gaugeResults", len(gaugeResults))
-	}
 	for i, organization := range organizations {
 		slog.Info("Collecting organization",
 			"progress", fmt.Sprintf("%d/%d", i+1, total),
@@ -212,11 +202,6 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 		orgStart := time.Now()
 		results, err := collect(ctx, client, organization, func(r gaugeResult) {
 			gaugeResults = append(gaugeResults, r)
-			projectResultsPublished++
-			// Publish progressively so long-running scrapes still surface data.
-			if projectResultsPublished%10 == 0 {
-				publish("project-batch")
-			}
 		})
 		orgDuration := time.Since(orgStart)
 		if err != nil {
@@ -240,10 +225,7 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 			"projects", len(results),
 			"issues", issueCount,
 			"duration", orgDuration.Round(time.Millisecond))
-		publish("organization-complete")
-		// stop right away in case of the context being cancelled. This ensures that
-		// we don't wait for a complete collect run for all organizations before
-		// stopping.
+		// stop right away in case of the context being cancelled.
 		select {
 		case <-ctx.Done():
 			return
@@ -255,7 +237,15 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 		"organizations", total,
 		"totalGaugeResults", len(gaugeResults),
 		"duration", scrapeDuration.Round(time.Millisecond))
-	publish("cycle-complete")
+	scrapeMutex.Lock()
+	register(gaugeResults)
+	scrapeMutex.Unlock()
+	if len(gaugeResults) > 0 {
+		readyMutex.Lock()
+		ready = true
+		readyMutex.Unlock()
+	}
+	slog.Info("Published metrics snapshot", "gaugeResults", len(gaugeResults))
 }
 
 func organizationNames(orgs []org) []string {
@@ -293,9 +283,9 @@ func filterByIDs(organizations []org, ids []string) []org {
 	return filtered
 }
 
-// register registers results in the vulnerability gauge. To handle changing
-// flags, e.g. ignored, upgradeable the metric is cleared before setting new
-// values.
+// register replaces the vulnerability gauge with a complete scrape snapshot.
+// Reset is only called once the full cycle is collected so Prometheus scrapes
+// see stable values between cycles instead of partial ramp-up data.
 // See https://github.com/lunarway/snyk_exporter/issues/21 for details.
 func register(results []gaugeResult) {
 	vulnerabilityGauge.Reset()

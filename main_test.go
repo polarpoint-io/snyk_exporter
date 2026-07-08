@@ -182,7 +182,7 @@ func TestRunAPIPolling_issuesTimeout(t *testing.T) {
 	// wait for the polling to stop
 	wg.Wait()
 
-	if !ready {
-		t.Fatalf("Ready not set but it should be")
+	if ready {
+		t.Fatalf("Ready should not be set when scrape never completes")
 	}
 }
