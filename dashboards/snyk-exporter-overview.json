@@ -333,7 +333,7 @@
     },
     {
       "id": 6,
-      "title": "Upgradeable Ratio",
+      "title": "Patchable Ratio",
       "type": "stat",
       "gridPos": {
         "x": 20,
@@ -352,8 +352,8 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "sum(snyk_vulnerabilities_total{organization=~\"$organization\",project=~\"$project\",upgradeable=\"true\"}) / clamp_min(sum(snyk_vulnerabilities_total{organization=~\"$organization\",project=~\"$project\"}), 1)",
-          "legendFormat": "upgradeable ratio",
+          "expr": "sum(snyk_vulnerabilities_total{organization=~\"$organization\",project=~\"$project\",patchable=\"true\"}) / clamp_min(sum(snyk_vulnerabilities_total{organization=~\"$organization\",project=~\"$project\"}), 1)",
+          "legendFormat": "patchable ratio",
           "instant": true,
           "range": false
         }
@@ -588,7 +588,7 @@
     },
     {
       "id": 10,
-      "title": "Top 15 Issue Titles",
+      "title": "Top 15 Critical/High by Project",
       "type": "table",
       "gridPos": {
         "x": 12,
@@ -607,7 +607,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "topk(15, sum by (project, issue_title, severity) (snyk_vulnerabilities_total{organization=~\"$organization\",project=~\"$project\",severity=~\"critical|high\"}))",
+          "expr": "topk(15, sum by (project, severity, issue_type) (snyk_vulnerabilities_total{organization=~\"$organization\",project=~\"$project\",severity=~\"critical|high\"}))",
           "format": "table",
           "instant": true,
           "range": false
@@ -660,13 +660,13 @@
             },
             "indexByName": {
               "Value": 3,
-              "issue_title": 1,
+              "issue_type": 2,
               "project": 0,
-              "severity": 2
+              "severity": 1
             },
             "renameByName": {
               "Value": "Count",
-              "issue_title": "Issue",
+              "issue_type": "Issue Type",
               "project": "Project",
               "severity": "Severity"
             }
