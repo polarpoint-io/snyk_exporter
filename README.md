@@ -75,7 +75,7 @@ This fork migrates all API calls from the retired Snyk v1 API to the current **S
 |---|---|---|
 | List organisations | `GET /api/v1/orgs` | `GET /rest/orgs?version=2024-10-15` |
 | List projects | `GET /api/v1/org/{id}/projects` | `GET /rest/orgs/{id}/projects?version=2024-10-15` |
-| List issues | `POST /api/v1/org/{id}/project/{id}/aggregated-issues` | `GET /rest/orgs/{id}/issues?version=2024-10-15&project_id={id}` |
+| List issues | `POST /api/v1/org/{id}/project/{id}/aggregated-issues` | `GET /rest/orgs/{id}/issues?version=2024-10-15&scan_item.type=project&scan_item.id={id}` |
 
 All endpoints support cursor-based pagination via `links.next` and are followed automatically.
 

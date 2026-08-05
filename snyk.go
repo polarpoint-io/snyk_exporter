@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 )
 
 // apiVersion is the Snyk REST API version used for all requests.
@@ -19,31 +20,58 @@ type client struct {
 	baseURL    string
 }
 
-// getOrganizations fetches all orgs the token has access to, following pagination.
-func (c *client) getOrganizations() (orgsResponse, error) {
-	var all []org
-	next := fmt.Sprintf("%s/orgs?version=%s&limit=100", c.baseURL, apiVersion)
+// fetchPages walks a paginated REST collection from startURL, calling decode
+// for each page body. decode returns the raw "next" link from that page.
+//
+// A page URL is never requested twice. Without that guard a self-referential
+// next link would loop forever, appending the same records on every pass.
+func (c *client) fetchPages(startURL string, decode func(body io.Reader) (string, error)) error {
+	seen := make(map[string]struct{})
+	next := startURL
 	for next != "" {
+		if _, visited := seen[next]; visited {
+			slog.Warn("Pagination loop detected, stopping early", "url", next)
+			return nil
+		}
+		seen[next] = struct{}{}
+
 		req, err := http.NewRequest(http.MethodGet, next, nil)
 		if err != nil {
-			return orgsResponse{}, err
+			return err
 		}
 		response, err := c.do(req)
 		if err != nil {
-			return orgsResponse{}, err
+			return err
 		}
-		var page restOrgsPage
-		if err = json.NewDecoder(response.Body).Decode(&page); err != nil {
-			return orgsResponse{}, err
-		}
+		link, err := decode(response.Body)
 		response.Body.Close()
+		if err != nil {
+			return err
+		}
+		next = resolveNext(c.baseURL, link)
+	}
+	return nil
+}
+
+// getOrganizations fetches all orgs the token has access to, following pagination.
+func (c *client) getOrganizations() (orgsResponse, error) {
+	var all []org
+	start := fmt.Sprintf("%s/orgs?version=%s&limit=100", c.baseURL, apiVersion)
+	err := c.fetchPages(start, func(body io.Reader) (string, error) {
+		var page restOrgsPage
+		if err := json.NewDecoder(body).Decode(&page); err != nil {
+			return "", err
+		}
 		for _, item := range page.Data {
 			all = append(all, org{
 				ID:   item.ID,
 				Name: item.Attributes.Name,
 			})
 		}
-		next = resolveNext(c.baseURL, page.Links.Next)
+		return page.Links.Next, nil
+	})
+	if err != nil {
+		return orgsResponse{}, err
 	}
 	return orgsResponse{Orgs: all}, nil
 }
@@ -51,21 +79,12 @@ func (c *client) getOrganizations() (orgsResponse, error) {
 // getProjects fetches all projects for an org, following pagination.
 func (c *client) getProjects(organizationID string) (projectsResponse, error) {
 	var all []project
-	next := fmt.Sprintf("%s/orgs/%s/projects?version=%s&limit=100", c.baseURL, organizationID, apiVersion)
-	for next != "" {
-		req, err := http.NewRequest(http.MethodGet, next, nil)
-		if err != nil {
-			return projectsResponse{}, err
-		}
-		response, err := c.do(req)
-		if err != nil {
-			return projectsResponse{}, err
-		}
+	start := fmt.Sprintf("%s/orgs/%s/projects?version=%s&limit=100", c.baseURL, url.PathEscape(organizationID), apiVersion)
+	err := c.fetchPages(start, func(body io.Reader) (string, error) {
 		var page restProjectsPage
-		if err = json.NewDecoder(response.Body).Decode(&page); err != nil {
-			return projectsResponse{}, err
+		if err := json.NewDecoder(body).Decode(&page); err != nil {
+			return "", err
 		}
-		response.Body.Close()
 		for _, item := range page.Data {
 			all = append(all, project{
 				ID:          item.ID,
@@ -73,29 +92,34 @@ func (c *client) getProjects(organizationID string) (projectsResponse, error) {
 				IsMonitored: item.Attributes.Status == "active",
 			})
 		}
-		next = resolveNext(c.baseURL, page.Links.Next)
+		return page.Links.Next, nil
+	})
+	if err != nil {
+		return projectsResponse{}, err
 	}
 	return projectsResponse{Projects: all}, nil
 }
 
 // getIssues fetches all issues for an org+project, following pagination.
+//
+// The org-level issues endpoint is scoped to a single project with the
+// scan_item.type/scan_item.id pair. Snyk silently ignores unrecognised query
+// parameters, so getting this wrong returns every issue in the organization
+// for every project, inflating the totals by a factor of the project count.
 func (c *client) getIssues(organizationID, projectID string) (issuesResponse, error) {
 	var all []issue
-	next := fmt.Sprintf("%s/orgs/%s/issues?version=%s&limit=100&project_id=%s", c.baseURL, organizationID, apiVersion, projectID)
-	for next != "" {
-		req, err := http.NewRequest(http.MethodGet, next, nil)
-		if err != nil {
-			return issuesResponse{}, err
-		}
-		response, err := c.do(req)
-		if err != nil {
-			return issuesResponse{}, err
-		}
+	query := url.Values{
+		"version":        {apiVersion},
+		"limit":          {"100"},
+		"scan_item.type": {"project"},
+		"scan_item.id":   {projectID},
+	}
+	start := fmt.Sprintf("%s/orgs/%s/issues?%s", c.baseURL, url.PathEscape(organizationID), query.Encode())
+	err := c.fetchPages(start, func(body io.Reader) (string, error) {
 		var page restIssuesPage
-		if err = json.NewDecoder(response.Body).Decode(&page); err != nil {
-			return issuesResponse{}, err
+		if err := json.NewDecoder(body).Decode(&page); err != nil {
+			return "", err
 		}
-		response.Body.Close()
 		for _, item := range page.Data {
 			all = append(all, issue{
 				ID:        item.ID,
@@ -111,13 +135,21 @@ func (c *client) getIssues(organizationID, projectID string) (issuesResponse, er
 				},
 			})
 		}
-		next = resolveNext(c.baseURL, page.Links.Next)
+		return page.Links.Next, nil
+	})
+	if err != nil {
+		return issuesResponse{}, err
 	}
 	return issuesResponse{Issues: all}, nil
 }
 
 // resolveNext converts a relative or absolute "next" link into a full URL.
 // Returns "" when there is no next page.
+//
+// Snyk returns next links rooted at the API version prefix (for example
+// "/orgs/{id}/issues?...") while baseURL carries that prefix ("…/rest").
+// A plain ResolveReference would drop it, so the base path is reapplied when
+// the link does not already carry it.
 func resolveNext(base, next string) string {
 	if next == "" {
 		return ""
@@ -133,6 +165,10 @@ func resolveNext(base, next string) string {
 	rel, err := url.Parse(next)
 	if err != nil {
 		return ""
+	}
+	basePath := strings.TrimSuffix(b.Path, "/")
+	if basePath != "" && strings.HasPrefix(rel.Path, "/") && !strings.HasPrefix(rel.Path, basePath+"/") {
+		rel.Path = basePath + rel.Path
 	}
 	return b.ResolveReference(rel).String()
 }
@@ -176,8 +212,8 @@ type restOrgsPage struct {
 }
 
 type restOrgItem struct {
-	ID         string          `json:"id"`
-	Attributes restOrgAttrs    `json:"attributes"`
+	ID         string       `json:"id"`
+	Attributes restOrgAttrs `json:"attributes"`
 }
 
 type restOrgAttrs struct {
@@ -192,8 +228,8 @@ type restProjectsPage struct {
 }
 
 type restProjectItem struct {
-	ID         string             `json:"id"`
-	Attributes restProjectAttrs   `json:"attributes"`
+	ID         string           `json:"id"`
+	Attributes restProjectAttrs `json:"attributes"`
 }
 
 type restProjectAttrs struct {
@@ -209,16 +245,16 @@ type restIssuesPage struct {
 }
 
 type restIssueItem struct {
-	ID         string          `json:"id"`
-	Attributes restIssueAttrs  `json:"attributes"`
+	ID         string         `json:"id"`
+	Attributes restIssueAttrs `json:"attributes"`
 }
 
 type restIssueAttrs struct {
-	Title                  string           `json:"title"`
-	IssueType              string           `json:"type"`
-	EffectiveSeverityLevel string           `json:"effective_severity_level"`
-	Ignored                bool             `json:"ignored"`
-	Coordinates            restCoordinates  `json:"coordinates"`
+	Title                  string          `json:"title"`
+	IssueType              string          `json:"type"`
+	EffectiveSeverityLevel string          `json:"effective_severity_level"`
+	Ignored                bool            `json:"ignored"`
+	Coordinates            restCoordinates `json:"coordinates"`
 }
 
 // restCoordinates is a named slice so we can attach helper methods.
@@ -263,8 +299,8 @@ type orgsResponse struct {
 }
 
 type org struct {
-	ID    string
-	Name  string
+	ID   string
+	Name string
 }
 
 type projectsResponse struct {
