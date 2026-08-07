@@ -2,8 +2,8 @@ apiVersion: v2
 name: snyk-exporter
 description: Prometheus exporter for Snyk vulnerability data using the Snyk REST API v2
 type: application
-version: 1.1.2
-appVersion: "1.1.2"
+version: 1.1.3
+appVersion: "1.1.3"
 keywords:
   - snyk
   - prometheus
