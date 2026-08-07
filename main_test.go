@@ -142,7 +142,19 @@ func TestAggregateIssues(t *testing.T) {
 	}
 }
 
-func TestRunAPIPolling_issuesTimeout(t *testing.T) {
+// TestRunAPIPolling_notReadyBeforeFirstCycle checks that readiness is withheld
+// until a scrape cycle finishes.
+//
+// Readiness deliberately reports "this process completed a cycle", not "the
+// cycle found data". Tying it to results meant a Snyk-side failure pulled the
+// pod from its Service, which removed the Prometheus target and hid the
+// scrape-failure metrics that explain the outage.
+func TestRunAPIPolling_notReadyBeforeFirstCycle(t *testing.T) {
+	readyMutex.Lock()
+	ready = false
+	readyMutex.Unlock()
+
+	release := make(chan struct{})
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		calls++
@@ -158,9 +170,11 @@ func TestRunAPIPolling_issuesTimeout(t *testing.T) {
 			}`))
 			return
 		}
-		time.Sleep(1 * time.Second)
+		// block the first collection until the test releases it
+		<-release
 		rw.WriteHeader(http.StatusOK)
 	}))
+	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -169,20 +183,22 @@ func TestRunAPIPolling_issuesTimeout(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := runAPIPolling(ctx, server.URL, "token", nil, 20*time.Millisecond, 500*time.Millisecond)
+		err := runAPIPolling(ctx, server.URL, "token", nil, 20*time.Millisecond, 5*time.Second)
 		if err != nil {
 			t.Errorf("unexpected error result: %v", err)
 		}
 	}()
 
-	// stop the polling again after 100ms
 	<-time.After(100 * time.Millisecond)
-	cancel()
 
-	// wait for the polling to stop
-	wg.Wait()
-
-	if ready {
-		t.Fatalf("Ready should not be set when scrape never completes")
+	readyMutex.RLock()
+	readyMidCycle := ready
+	readyMutex.RUnlock()
+	if readyMidCycle {
+		t.Error("ready should not be set before the first cycle completes")
 	}
+
+	close(release)
+	cancel()
+	wg.Wait()
 }

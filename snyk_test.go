@@ -6,22 +6,25 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
-// fakeSnyk mimics the Snyk REST API. The org-level /issues endpoint filters on
-// scan_item.type/scan_item.id only; any other query parameter is ignored and
-// the whole organization is returned, which is how Snyk behaves.
-func fakeSnyk(t *testing.T) *httptest.Server {
+// snykStub mimics the Snyk REST API closely enough to exercise grouping.
+type snykStub struct {
+	// issues maps a project ID to the issue IDs found in it. The empty key
+	// holds issues returned with no scan_item reference at all.
+	issues map[string][]string
+	// projects is the set of projects the projects endpoint reports.
+	projects []string
+
+	mu           sync.Mutex
+	issueQueries int
+}
+
+func (s *snykStub) server(t *testing.T) *httptest.Server {
 	t.Helper()
-
-	issuesByProject := map[string][]string{
-		"proj-a": {"iss-a1", "iss-a2"},
-		"proj-b": {"iss-b1", "iss-b2"},
-	}
-
 	return httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		q := req.URL.Query()
 		rw.Header().Set("Content-Type", "application/vnd.api+json")
 
 		switch {
@@ -30,25 +33,46 @@ func fakeSnyk(t *testing.T) *httptest.Server {
 			rw.Write([]byte(`{"data":[{"id":"org-1","attributes":{"name":"acme"}}],"links":{}}`))
 
 		case strings.HasSuffix(req.URL.Path, "/projects"):
-			//nolint:errcheck
-			rw.Write([]byte(`{"data":[
-				{"id":"proj-a","attributes":{"name":"a","status":"active"}},
-				{"id":"proj-b","attributes":{"name":"b","status":"active"}}
-			],"links":{}}`))
-
-		case strings.HasSuffix(req.URL.Path, "/issues"):
-			var ids []string
-			if q.Get("scan_item.type") == "project" && q.Get("scan_item.id") != "" {
-				ids = issuesByProject[q.Get("scan_item.id")]
-			} else {
-				ids = append(ids, issuesByProject["proj-a"]...)
-				ids = append(ids, issuesByProject["proj-b"]...)
+			var items []map[string]any
+			for _, p := range s.projects {
+				items = append(items, map[string]any{
+					"id":         p,
+					"attributes": map[string]any{"name": p, "status": "active"},
+				})
 			}
 			//nolint:errcheck
-			json.NewEncoder(rw).Encode(map[string]any{
-				"data":  issueItems(ids),
-				"links": map[string]any{},
-			})
+			json.NewEncoder(rw).Encode(map[string]any{"data": items, "links": map[string]any{}})
+
+		case strings.HasSuffix(req.URL.Path, "/issues"):
+			s.mu.Lock()
+			s.issueQueries++
+			s.mu.Unlock()
+
+			var items []map[string]any
+			for projectID, ids := range s.issues {
+				for _, id := range ids {
+					item := map[string]any{
+						"id": id,
+						"attributes": map[string]any{
+							"title":                    "CVE",
+							"type":                     "package_vulnerability",
+							"effective_severity_level": "high",
+							"ignored":                  false,
+							"coordinates":              []any{},
+						},
+					}
+					if projectID != "" {
+						item["relationships"] = map[string]any{
+							"scan_item": map[string]any{
+								"data": map[string]any{"id": projectID, "type": "project"},
+							},
+						}
+					}
+					items = append(items, item)
+				}
+			}
+			//nolint:errcheck
+			json.NewEncoder(rw).Encode(map[string]any{"data": items, "links": map[string]any{}})
 
 		default:
 			t.Errorf("unexpected request path %s", req.URL.Path)
@@ -57,53 +81,118 @@ func fakeSnyk(t *testing.T) *httptest.Server {
 	}))
 }
 
-func issueItems(ids []string) []map[string]any {
-	var items []map[string]any
-	for _, id := range ids {
-		items = append(items, map[string]any{
-			"id": id,
-			"attributes": map[string]any{
-				"title":                    "CVE",
-				"type":                     "package_vulnerability",
-				"effective_severity_level": "high",
-				"ignored":                  false,
-				"coordinates":              []any{},
-			},
-		})
+func countByProject(results []gaugeResult) map[string]int {
+	counts := make(map[string]int)
+	for _, r := range results {
+		for _, ar := range r.results {
+			counts[r.project] += ar.count
+		}
 	}
-	return items
+	return counts
 }
 
-// TestIssuesAreScopedToProject guards against the issue counts scaling with the
-// number of projects in an organization. Issues must be requested per project
-// with scan_item.id; without that filter every project reports the whole
-// organization and the totals inflate on every project scraped.
-func TestIssuesAreScopedToProject(t *testing.T) {
-	server := fakeSnyk(t)
+func collectFrom(t *testing.T, stub *snykStub) []gaugeResult {
+	t.Helper()
+	server := stub.server(t)
 	defer server.Close()
 
 	c := &client{httpClient: server.Client(), token: "token", baseURL: server.URL}
-
 	orgs, err := getOrganizations(c, nil)
 	if err != nil {
 		t.Fatalf("get organizations: %v", err)
 	}
-
-	results, err := collect(context.Background(), c, orgs[0], nil)
+	results, err := collect(context.Background(), c, orgs[0])
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
+	return results
+}
 
-	total := 0
-	for _, r := range results {
-		for _, ar := range r.results {
-			total += ar.count
-		}
+// TestIssuesGroupedByProject guards against the totals scaling with the number
+// of projects. Every issue must be counted exactly once, under its own project.
+func TestIssuesGroupedByProject(t *testing.T) {
+	stub := &snykStub{
+		projects: []string{"proj-a", "proj-b"},
+		issues: map[string][]string{
+			"proj-a": {"iss-a1", "iss-a2"},
+			"proj-b": {"iss-b1"},
+		},
 	}
 
-	const want = 4 // 2 projects x 2 issues each
-	if total != want {
-		t.Errorf("issue count inflated: got %d, want %d", total, want)
+	counts := countByProject(collectFrom(t, stub))
+
+	if got, want := counts["proj-a"], 2; got != want {
+		t.Errorf("proj-a count = %d, want %d", got, want)
+	}
+	if got, want := counts["proj-b"], 1; got != want {
+		t.Errorf("proj-b count = %d, want %d", got, want)
+	}
+
+	total := 0
+	for _, c := range counts {
+		total += c
+	}
+	if want := 3; total != want {
+		t.Errorf("total count = %d, want %d", total, want)
+	}
+}
+
+// TestIssuesFetchedOncePerOrganization pins the request pattern: one issues
+// call per organization, not one per project.
+func TestIssuesFetchedOncePerOrganization(t *testing.T) {
+	stub := &snykStub{
+		projects: []string{"proj-a", "proj-b", "proj-c"},
+		issues:   map[string][]string{"proj-a": {"iss-a1"}},
+	}
+
+	collectFrom(t, stub)
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.issueQueries != 1 {
+		t.Errorf("issues endpoint called %d times, want 1", stub.issueQueries)
+	}
+}
+
+// TestUnattributedIssuesAreStillCounted ensures issues Snyk returns without a
+// scan_item reference are surfaced rather than silently dropped.
+func TestUnattributedIssuesAreStillCounted(t *testing.T) {
+	stub := &snykStub{
+		projects: []string{"proj-a"},
+		issues: map[string][]string{
+			"proj-a": {"iss-a1"},
+			"":       {"iss-orphan1", "iss-orphan2"},
+		},
+	}
+
+	counts := countByProject(collectFrom(t, stub))
+
+	if got, want := counts["proj-a"], 1; got != want {
+		t.Errorf("proj-a count = %d, want %d", got, want)
+	}
+	if got, want := counts[unknownProject], 2; got != want {
+		t.Errorf("%s count = %d, want %d", unknownProject, got, want)
+	}
+}
+
+// TestIssuesForUnknownProjectAreCounted covers issues referencing a scan item
+// that is missing from the project list.
+func TestIssuesForUnknownProjectAreCounted(t *testing.T) {
+	stub := &snykStub{
+		projects: []string{"proj-a"},
+		issues: map[string][]string{
+			"proj-a":    {"iss-a1"},
+			"proj-gone": {"iss-x1"},
+		},
+	}
+
+	counts := countByProject(collectFrom(t, stub))
+
+	if got, want := counts["proj-a"], 1; got != want {
+		t.Errorf("proj-a count = %d, want %d", got, want)
+	}
+	if got, want := counts[unknownProject], 1; got != want {
+		t.Errorf("%s count = %d, want %d", unknownProject, got, want)
 	}
 }
 
@@ -114,22 +203,27 @@ func TestPaginationLoopGuard(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		requests++
 		if requests > 10 {
-			t.Fatal("pagination did not terminate")
+			t.Error("pagination did not terminate")
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 		//nolint:errcheck
 		json.NewEncoder(rw).Encode(map[string]any{
-			"data":  issueItems([]string{"iss-1"}),
+			"data": []map[string]any{{
+				"id":         "iss-1",
+				"attributes": map[string]any{"effective_severity_level": "high"},
+			}},
 			"links": map[string]any{"next": "/orgs/org-1/issues?version=" + apiVersion + "&same=1"},
 		})
 	}))
 	defer server.Close()
 
 	c := &client{httpClient: server.Client(), token: "token", baseURL: server.URL}
-	issues, err := c.getIssues("org-1", "proj-a")
+	issues, err := c.getOrgIssues("org-1")
 	if err != nil {
 		t.Fatalf("get issues: %v", err)
 	}
-	// first page + one follow of the next link, then the loop is detected
+	// first page plus one follow of the next link, then the loop is detected
 	if len(issues.Issues) > 2 {
 		t.Errorf("pagination loop accumulated %d issues", len(issues.Issues))
 	}

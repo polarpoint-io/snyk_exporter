@@ -75,9 +75,20 @@ This fork migrates all API calls from the retired Snyk v1 API to the current **S
 |---|---|---|
 | List organisations | `GET /api/v1/orgs` | `GET /rest/orgs?version=2024-10-15` |
 | List projects | `GET /api/v1/org/{id}/projects` | `GET /rest/orgs/{id}/projects?version=2024-10-15` |
-| List issues | `POST /api/v1/org/{id}/project/{id}/aggregated-issues` | `GET /rest/orgs/{id}/issues?version=2024-10-15&scan_item.type=project&scan_item.id={id}` |
+| List issues | `POST /api/v1/org/{id}/project/{id}/aggregated-issues` | `GET /rest/orgs/{id}/issues?version=2024-10-15` |
 
 All endpoints support cursor-based pagination via `links.next` and are followed automatically.
+
+Issues are fetched once per organization and grouped by project locally, using
+each issue's `scan_item` relationship. Server-side per-project filtering was
+tried and abandoned: the parameter name varies by API version and Snyk accepts
+an unrecognised one rather than rejecting it, silently returning the whole
+organization for every project. Grouping locally also keeps the request count
+flat instead of proportional to the number of projects.
+
+Any issue Snyk returns without a resolvable `scan_item` is counted under the
+project name `unknown` rather than dropped, and reported on
+`snyk_unattributed_issues`.
 
 ## Metrics
 
@@ -100,6 +111,33 @@ snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="high
 snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="low",issue_type="package_vulnerability",ignored="true",upgradeable="false",patchable="false",monitored="false"} 2
 snyk_vulnerabilities_total{organization="my-org",project="my-app",severity="medium",issue_type="license",ignored="true",upgradeable="false",patchable="false",monitored="true"} 1
 ```
+
+### Scrape health
+
+These describe the exporter's own collection run, so a problem talking to Snyk
+is visible in Prometheus rather than only in container logs:
+
+| Metric | Meaning |
+|---|---|
+| `snyk_scrape_success{organization}` | `1` if the last collection for that org succeeded, `0` if it failed |
+| `snyk_scrape_errors_total{organization,stage}` | Failed API calls, where `stage` is `projects`, `issues` or `other` |
+| `snyk_last_scrape_timestamp_seconds` | Unix time of the last completed cycle |
+| `snyk_scrape_duration_seconds` | Duration of the last completed cycle |
+| `snyk_unattributed_issues{organization}` | Issues that could not be matched to a project |
+
+Useful alerts:
+
+```
+snyk_scrape_success == 0
+time() - snyk_last_scrape_timestamp_seconds > 3600
+snyk_unattributed_issues > 0
+```
+
+Readiness (`/ready`) reports that the process has completed a scrape cycle, not
+that the cycle found data. It deliberately does not fail when Snyk is
+unreachable: doing so removes the pod from its Service, which drops the
+Prometheus target and hides the scrape-health metrics above at exactly the
+moment they are needed.
 
 # Build
 

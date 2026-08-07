@@ -37,7 +37,56 @@ var (
 		},
 		[]string{organizationLabel, projectLabel, issueTypeLabel, severityLabel, ignoredLabel, upgradeableLabel, patchableLabel, monitoredLabel},
 	)
+
+	// The metrics below describe the scrape itself. They exist so a failure
+	// against the Snyk API is visible in Prometheus rather than only in
+	// container logs, which are not always available to whoever is debugging.
+	scrapeSuccessGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "snyk_scrape_success",
+			Help: "1 if the last scrape of this organization succeeded, 0 if it failed",
+		},
+		[]string{organizationLabel},
+	)
+
+	scrapeErrorsCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "snyk_scrape_errors_total",
+			Help: "Count of failed Snyk API calls by organization and stage",
+		},
+		[]string{organizationLabel, "stage"},
+	)
+
+	lastScrapeTimestampGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "snyk_last_scrape_timestamp_seconds",
+			Help: "Unix timestamp of the last completed scrape cycle",
+		},
+	)
+
+	scrapeDurationGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "snyk_scrape_duration_seconds",
+			Help: "Duration of the last completed scrape cycle in seconds",
+		},
+	)
+
+	// Issues Snyk returned without a resolvable project reference. A non-zero
+	// value means grouping fell back to the "unknown" project label and the
+	// per-project breakdown is incomplete.
+	unattributedIssuesGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "snyk_unattributed_issues",
+			Help: "Issues that could not be attributed to a project in the last scrape",
+		},
+		[]string{organizationLabel},
+	)
 )
+
+// unknownProject labels issues Snyk returned without a usable scan_item
+// reference. They are still counted, so totals stay correct even when the
+// per-project split cannot be reconstructed.
+const unknownProject = "unknown"
 
 var (
 	ready       = false
@@ -67,7 +116,14 @@ func main() {
 		slog.Info("Starting Snyk exporter for all organization for token")
 	}
 
-	prometheus.MustRegister(vulnerabilityGauge)
+	prometheus.MustRegister(
+		vulnerabilityGauge,
+		scrapeSuccessGauge,
+		scrapeErrorsCounter,
+		lastScrapeTimestampGauge,
+		scrapeDurationGauge,
+		unattributedIssuesGauge,
+	)
 	http.Handle("/metrics", promhttp.InstrumentMetricHandler(
 		prometheus.DefaultRegisterer, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			scrapeMutex.RLock()
@@ -200,11 +256,11 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 			"organization", organization.Name,
 			"organizationId", organization.ID)
 		orgStart := time.Now()
-		results, err := collect(ctx, client, organization, func(r gaugeResult) {
-			gaugeResults = append(gaugeResults, r)
-		})
+		results, err := collect(ctx, client, organization)
 		orgDuration := time.Since(orgStart)
 		if err != nil {
+			scrapeSuccessGauge.WithLabelValues(organization.Name).Set(0)
+			scrapeErrorsCounter.WithLabelValues(organization.Name, stageOf(err)).Inc()
 			slog.Error("Collection failed for organization",
 				"error", err,
 				"organization", organization.Name,
@@ -212,6 +268,8 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 				"duration", orgDuration)
 			continue
 		}
+		scrapeSuccessGauge.WithLabelValues(organization.Name).Set(1)
+		gaugeResults = append(gaugeResults, results...)
 		// count total issues across all projects for this org
 		issueCount := 0
 		for _, r := range results {
@@ -240,11 +298,18 @@ func pollAPI(ctx context.Context, client *client, organizations []org) {
 	scrapeMutex.Lock()
 	register(gaugeResults)
 	scrapeMutex.Unlock()
-	if len(gaugeResults) > 0 {
-		readyMutex.Lock()
-		ready = true
-		readyMutex.Unlock()
-	}
+
+	lastScrapeTimestampGauge.Set(float64(time.Now().Unix()))
+	scrapeDurationGauge.Set(scrapeDuration.Seconds())
+
+	// Readiness marks "this process completed a scrape cycle", not "the scrape
+	// found data". Gating on results meant any Snyk-side failure took the pod
+	// out of the Service, which removed the Prometheus target altogether and
+	// hid the very metrics that explain the failure.
+	readyMutex.Lock()
+	ready = true
+	readyMutex.Unlock()
+
 	slog.Info("Published metrics snapshot", "gaugeResults", len(gaugeResults))
 }
 
@@ -303,60 +368,104 @@ type gaugeResult struct {
 	results      []aggregateResult
 }
 
-func collect(ctx context.Context, client *client, organization org, onProjectCollected func(gaugeResult)) ([]gaugeResult, error) {
+// collect gathers one organization's issues and groups them by project.
+//
+// Both API calls are organization-scoped, so the request count no longer grows
+// with the number of projects.
+func collect(ctx context.Context, client *client, organization org) ([]gaugeResult, error) {
 	projects, err := client.getProjects(organization.ID)
 	if err != nil {
 		return nil, fmt.Errorf("get projects for organization: %w", err)
 	}
-
-	total := len(projects.Projects)
 	slog.Info("Fetched projects for organization",
 		"organization", organization.Name,
-		"projects", total)
+		"projects", len(projects.Projects))
 
-	var gaugeResults []gaugeResult
-	for i, project := range projects.Projects {
-		start := time.Now()
-		issues, err := client.getIssues(organization.ID, project.ID)
-		duration := time.Since(start)
-		if err != nil {
-			slog.Error("Failed to get issues for project",
-				"organization", organization.Name,
-				"project", project.Name,
-				"projectId", project.ID,
-				"progress", fmt.Sprintf("%d/%d", i+1, total),
-				"duration", duration.Round(time.Millisecond),
-				"error", err)
+	select {
+	case <-ctx.Done():
+		return nil, nil
+	default:
+	}
+
+	start := time.Now()
+	issues, err := client.getOrgIssues(organization.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get issues for organization: %w", err)
+	}
+	slog.Info("Fetched issues for organization",
+		"organization", organization.Name,
+		"issues", len(issues.Issues),
+		"duration", time.Since(start).Round(time.Millisecond))
+
+	byProject := make(map[string][]issue, len(projects.Projects))
+	var unattributed []issue
+	for _, i := range issues.Issues {
+		if i.ProjectID == "" {
+			unattributed = append(unattributed, i)
 			continue
 		}
-		results := aggregateIssues(issues.Issues)
-		issueCount := len(issues.Issues)
-		slog.Info("Collected project",
+		byProject[i.ProjectID] = append(byProject[i.ProjectID], i)
+	}
+
+	unattributedIssuesGauge.WithLabelValues(organization.Name).Set(float64(len(unattributed)))
+	if len(unattributed) > 0 {
+		slog.Warn("Issues had no resolvable project reference, counting them under the unknown project",
 			"organization", organization.Name,
-			"project", project.Name,
-			"progress", fmt.Sprintf("%d/%d", i+1, total),
-			"issues", issueCount,
-			"monitored", project.IsMonitored,
-			"duration", duration.Round(time.Millisecond))
+			"issues", len(unattributed))
+	}
+
+	var gaugeResults []gaugeResult
+	seen := make(map[string]struct{}, len(projects.Projects))
+	for _, project := range projects.Projects {
+		seen[project.ID] = struct{}{}
+		projectIssues := byProject[project.ID]
+		if len(projectIssues) == 0 {
+			// Nothing to report for a clean project, and emitting an empty
+			// result would only add a series with no samples.
+			continue
+		}
 		gaugeResults = append(gaugeResults, gaugeResult{
 			organization: organization.Name,
 			project:      project.Name,
-			results:      results,
+			results:      aggregateIssues(projectIssues),
 			isMonitored:  project.IsMonitored,
 		})
-		if onProjectCollected != nil {
-			onProjectCollected(gaugeResults[len(gaugeResults)-1])
-		}
-		// stop right away in case of the context being cancelled. This ensures that
-		// we don't wait for a complete collect run for all projects before
-		// stopping.
-		select {
-		case <-ctx.Done():
-			return nil, nil
-		default:
+	}
+
+	// Issues pointing at a scan item that is not in the project list, plus any
+	// that carried no reference at all. Reported so totals stay complete.
+	orphaned := unattributed
+	for id, group := range byProject {
+		if _, ok := seen[id]; !ok {
+			orphaned = append(orphaned, group...)
 		}
 	}
+	if len(orphaned) > 0 {
+		slog.Warn("Issues did not match any known project",
+			"organization", organization.Name,
+			"issues", len(orphaned))
+		gaugeResults = append(gaugeResults, gaugeResult{
+			organization: organization.Name,
+			project:      unknownProject,
+			results:      aggregateIssues(orphaned),
+			isMonitored:  false,
+		})
+	}
+
 	return gaugeResults, nil
+}
+
+// stageOf labels a collection failure so snyk_scrape_errors_total shows which
+// API call is failing without needing the log line.
+func stageOf(err error) string {
+	switch {
+	case strings.Contains(err.Error(), "get projects"):
+		return "projects"
+	case strings.Contains(err.Error(), "get issues"):
+		return "issues"
+	default:
+		return "other"
+	}
 }
 
 type aggregateResult struct {
